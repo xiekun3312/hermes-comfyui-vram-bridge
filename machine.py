@@ -225,7 +225,7 @@ class Machine:
         env = dict(os.environ, POLARS_SKIP_CPU_CHECK="1", PYTHONUTF8="1")
         cmd = [
             str(self.comfy_python), "-s", str(self.comfy_main),
-            "--windows-standalone-build", "--lowvram", "--port", str(self.comfy_port),
+            "--windows-standalone-build", "--disable-auto-launch", "--lowvram", "--port", str(self.comfy_port),
             "--listen", "127.0.0.1", "--multi-user",
         ]
         return visible_console(cmd, cwd=self.comfy_root, env=env)

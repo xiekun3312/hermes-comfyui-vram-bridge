@@ -1,26 +1,33 @@
 """Local HTTP submission service and serial GPU handoff worker."""
 import argparse
 from copy import deepcopy
+import ctypes
+from ctypes import wintypes
 from datetime import datetime
+import errno
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
+from importlib.util import find_spec
 import json
 import logging
+import os
 from pathlib import Path
 import re
+import socket
 import sys
 import threading
 import time
 from urllib.parse import unquote, urlsplit
 from uuid import UUID, uuid4
 
-from machine import HttpError, Machine, listening, process_info, request, same_path
+from machine import HttpError, Machine, hidden, listening, process_info, request, same_path
 from preflight import BASE, check_prompt, checkpoint_names
 import wake
 
 
 ROOT = Path(__file__).resolve().parent
+DESKTOP_TASK = "ComfyUI-VRAM-Bridge-Desktop"
 MAX_BODY = 32 * 1024 * 1024
 BUSY = {"draining", "restoring", "waking", "recovery"}
 
@@ -360,12 +367,20 @@ class Bridge:
         try:
             def mark_sending(after_id, since):
                 self.update_wake(state="sending", auto_send=False, after_id=after_id, since=since, detail="")
-            session_id = wake.send(mark_sending)
+            try:
+                session_id = wake.send(mark_sending)
+            except Exception as exc:
+                if (self.latest_wake["state"] != "pending"
+                        or getattr(exc, "hresult", None) != wake.EVENT_E_ALL_SUBSCRIBERS_FAILED):
+                    raise
+                logging.warning("Hermes 界面自动化事件失败，准备重试发送", exc_info=True)
+                time.sleep(1)
+                session_id = wake.send(mark_sending)
             self.update_wake(state="delivered", session_id=session_id, detail="已确认新会话首条消息")
         except Exception as exc:
             state = "unconfirmed" if self.latest_wake["state"] == "sending" else "pending"
             self.update_wake(state=state, auto_send=False, detail=str(exc))
-            logging.warning("Hermes 唤醒 %s：%s", state, exc)
+            logging.warning("Hermes 唤醒 %s：%s", state, exc, exc_info=True)
 
     def finish_restore(self, process=None):
         self.set_phase("restoring", "关闭 ComfyUI，等待显存释放并恢复 LLM")
@@ -565,7 +580,10 @@ def handler_for(bridge):
                         self.reply(200, dashboard(bridge.status()), html=True)
                         return
                     if route == "/health":
-                        self.reply(200, {"status": "ok", "phase": bridge.status()["phase"]})
+                        self.reply(200, {
+                            "status": "ok", "phase": bridge.status()["phase"],
+                            "service": DESKTOP_TASK,
+                        })
                         return
                     if route == "/v1/status":
                         self.reply(200, bridge.status())
@@ -627,17 +645,70 @@ def handler_for(bridge):
     return Handler
 
 
-def serve(config, data_dir):
+class ExclusiveHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def configure_logging(data_dir):
     data_dir.mkdir(parents=True, exist_ok=True)
+    handlers = [logging.FileHandler(data_dir / "bridge.log", encoding="utf-8")]
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(data_dir / "bridge.log", encoding="utf-8")],
+        handlers=handlers,
     )
-    bridge = Bridge(config, data_dir)
-    with ThreadingHTTPServer(("127.0.0.1", config["control_port"]), handler_for(bridge)) as server:
-        logging.info("调度器已启动 http://127.0.0.1:%s/", config["control_port"])
-        threading.Thread(target=bridge.worker, daemon=True, name="gpu-worker").start()
-        server.serve_forever()
+
+
+def desktop_session():
+    session = wintypes.DWORD()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+        raise ctypes.WinError()
+    return session.value
+
+
+def serve(config, data_dir):
+    import msvcrt
+
+    session = desktop_session()
+    if not session:
+        raise RuntimeError("调度器需要在登录的 Windows 桌面会话中运行")
+    if find_spec("uiautomation") is None:
+        raise RuntimeError("调度器使用的 Python 缺少 uiautomation，请重新注册桌面启动入口")
+    with (data_dir / "controller.lock").open("a+b") as lock:
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            raise RuntimeError("此数据目录已有一个调度器在运行") from exc
+        bridge = Bridge(config, data_dir)
+        port = config["control_port"]
+        with ExclusiveHTTPServer(("127.0.0.1", port), handler_for(bridge)) as server:
+            logging.info("调度器已启动 http://127.0.0.1:%s/（桌面会话 %s）", port, session)
+            threading.Thread(target=bridge.worker, daemon=True, name="gpu-worker").start()
+            server.serve_forever()
+
+
+def start_desktop(port):
+    result = hidden("schtasks.exe", "/Run", "/TN", DESKTOP_TASK)
+    if result.returncode:
+        raise RuntimeError("无法启动桌面调度器，请登录 Windows 并运行 注册桌面启动入口.ps1")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            health = request(port, "/health", timeout=1)
+            if isinstance(health, dict) and health.get("service") == DESKTOP_TASK:
+                print(f"调度器已就绪 http://127.0.0.1:{port}/")
+                return
+        except (OSError, ValueError, HttpError):
+            pass
+        time.sleep(0.2)
+    raise RuntimeError("桌面调度器未就绪，请确认 Windows 已登录并查看 data/bridge.log")
 
 
 def main():
@@ -645,8 +716,10 @@ def main():
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("serve", "check", "status", "latest-wake", "retry-wake"):
+    for command in ("check", "status", "latest-wake", "retry-wake"):
         commands.add_parser(command)
+    serve_command = commands.add_parser("serve")
+    serve_command.add_argument("--desktop-task", action="store_true", help=argparse.SUPPRESS)
     submit = commands.add_parser("submit")
     submit.add_argument("file", type=Path)
     submit.add_argument("--request-id", type=uuid_text)
@@ -656,13 +729,22 @@ def main():
     result = commands.add_parser("result")
     result.add_argument("id", type=uuid_text)
     args = parser.parse_args()
+    local_serve = args.command == "serve" and (
+        args.desktop_task or args.config.resolve() != ROOT / "config.json"
+        or args.data_dir.resolve() != ROOT / "data"
+    )
+    if local_serve:
+        configure_logging(args.data_dir)
     config = read_json(args.config)
     if len({config["control_port"], config["llm_port"], config["comfy_port"]}) != 3:
         raise ValueError("调度器、LLM 和 ComfyUI 必须使用三个不同的端口")
     port = config["control_port"]
 
     if args.command == "serve":
-        serve(config, args.data_dir)
+        if local_serve:
+            serve(config, args.data_dir)
+        else:
+            start_desktop(port)
         return
     if args.command == "check":
         machine = Machine(config)
@@ -705,5 +787,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"调度器错误：{exc}", file=sys.stderr)
+        if sys.stderr is None:
+            logging.exception("调度器启动失败")
+        else:
+            print(f"调度器错误：{exc}", file=sys.stderr)
         sys.exit(1)

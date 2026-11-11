@@ -11,6 +11,7 @@ from machine import process_info
 
 
 TEXT = "醒来"
+EVENT_E_ALL_SUBSCRIBERS_FAILED = -2147220991  # 0x80040201
 EMPTY_COMPOSER = {
     "", "我们要构建什么？", "给 Hermes 一个任务", "你在想什么？", "描述你需要什么",
     "我们该处理什么？", "随便问点什么", "从一个目标开始",

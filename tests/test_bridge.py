@@ -115,6 +115,30 @@ class BridgeRegressionTests(unittest.TestCase):
             self.assertEqual(wake.confirmation(1, 100), "fresh")
             self.assertIsNone(wake.confirmation(3, 100))
 
+    def test_wake_retries_ui_event_failure_only_before_sending(self):
+        class UIEventError(Exception):
+            hresult = wake.EVENT_E_ALL_SUBSCRIBERS_FAILED
+
+        self.machine.llm_ready.return_value = True
+
+        def uncertain(mark_sending):
+            mark_sending(1, 100)
+            raise UIEventError("No event subscribers responded")
+
+        self.bridge.update_wake(state="pending")
+        with patch("wake.send", side_effect=[UIEventError(), "fresh"]) as send, patch("bridge.time.sleep"):
+            with self.assertLogs(level="WARNING"):
+                self.bridge.do_wake()
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(self.bridge.latest_wake["state"], "delivered")
+
+        self.bridge.update_wake(state="pending")
+        with patch("wake.send", side_effect=uncertain) as send:
+            with self.assertLogs(level="WARNING"):
+                self.bridge.do_wake()
+        send.assert_called_once()
+        self.assertEqual(self.bridge.latest_wake["state"], "unconfirmed")
+
 
 if __name__ == "__main__":
     unittest.main()

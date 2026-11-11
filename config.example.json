@@ -4,7 +4,7 @@
   "llm_alias": "local-model",
   "llm_bat": "C:\\local-llm\\serve-model.bat",
   "comfy_root": "C:\\ComfyUI_windows_portable",
-  "comfy_port": 8188,
+  "comfy_port": 8189,
   "gpu_index": 0,
   "max_idle_vram_mib": 3000,
   "vram_wait_seconds": 90,

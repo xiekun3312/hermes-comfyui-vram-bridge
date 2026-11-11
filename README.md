@@ -1,6 +1,6 @@
 # Hermes / ComfyUI 显存调度器
 
-在一台显存有限的 Windows 电脑上，让 Hermes 使用的 llama.cpp 模型和 ComfyUI 轮流使用 NVIDIA GPU。调度器独立运行，默认端口为 LLM `8021`、ComfyUI `8188`、调度器 `8781`。调度器 API 只监听回环地址。
+在一台显存有限的 Windows 电脑上，让 Hermes 使用的 llama.cpp 模型和 ComfyUI 轮流使用 NVIDIA GPU。调度器独立运行，默认端口为 LLM `8021`、ComfyUI `8189`、调度器 `8781`。调度器 API 只监听回环地址。
 
 ## 安装和配置
 
@@ -15,11 +15,19 @@ if (-not (Test-Path -LiteralPath .\config.json)) {
 
 编辑 `config.json` 中的 `comfy_root` 和 `llm_bat`。ComfyUI 根目录下应有 `python_embeded\python.exe` 和 `ComfyUI\main.py`。LLM 启动脚本旁应有 `llama.cpp\llama-server.exe`，脚本的 `--port` 和 `--alias` 应对应 `llm_port` 和 `llm_alias`。将 Hermes 的本地模型地址指向该端口。
 
+从旧版升级时，将现有 `config.json` 的 `comfy_port` 改为 `8189`。注册下文的桌面启动入口，然后在调度器空闲时重启以加载新配置。
+
 在 Hermes 技能目录中安装 [技能模板](hermes-skill/SKILL.example.md) 时，将它保存为 `comfyui-vram-bridge\SKILL.md`，把 `<PROJECT_DIR>` 换成项目绝对路径。可在 Hermes 的 `config.yaml` 中把 `comfyui-vram-bridge` 加入 `skills.auto_load`，使新聊天加载它。
 
 ## 启动和查看状态
 
-双击 `启动调度器.cmd`。保持调度器窗口运行，并登录 Windows 以便打开 Hermes Desktop 新会话。状态页是 [127.0.0.1:8781](http://127.0.0.1:8781/)。
+用运行 Hermes Desktop 的 Windows 账户登录，在项目目录注册一次桌面启动入口。注册时会检查当前 Python 是否安装了依赖，也可以用 `-PythonExe` 指定安装了依赖的 Python 路径。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\注册桌面启动入口.ps1
+```
+
+双击 `启动调度器.cmd`，或运行 `python -X utf8 .\bridge.py serve`。两种方式都按需启动同一个桌面调度器，确认 HTTP 就绪后返回。Hermes 后台也可以运行同一条命令。保持 Windows 登录且桌面可用，以便打开可见的 ComfyUI 和 LLM 控制台，以及 Hermes Desktop 新会话。状态页是 [127.0.0.1:8781](http://127.0.0.1:8781/)。
 
 ```powershell
 python -X utf8 .\bridge.py check
@@ -70,13 +78,13 @@ python -X utf8 .\bridge.py latest-wake
 ## 切换与恢复
 
 1. 验证 LLM 端口的监听者是配置里的 llama.cpp 实例。关闭该进程，确认端口释放并等待显存。
-2. 在单独的可见 Python 窗口启动 ComfyUI。每个任务提交到 `/prompt`，从 `/history/{prompt_id}` 读取结果。个别任务被拒绝或报错时继续执行其余任务。
+2. 在单独的可见 Python 窗口启动 ComfyUI，禁用自动打开浏览器。每个任务提交到 `/prompt`，从 `/history/{prompt_id}` 读取结果。个别任务被拒绝或报错时继续执行其余任务。
 3. 确认待运行和运行中的 ComfyUI 队列都清空后关闭本次启动的 Python 进程。等待显存，启动可见的 LLM 窗口，检查 `/health`。
 4. 调度器将 Hermes Desktop 切到前台，按 `Ctrl+N` 新建聊天，通过 Windows UI Automation 触发发送按钮。整个过程无需鼠标坐标。调度器核对“醒来”是否为新会话第一条用户消息，结果可在状态页或 `latest-wake` 查看。
 
-启动前若 `8188` 已被占用，批次会报错并保留正在运行的 LLM。运行中尽量在空闲时关闭调度器。重新启动时，调度器读取上次交接记录，恢复本地模型。中断时未确认的任务会标记失败，以免重跑已经提交的任务。
+启动前若 ComfyUI 配置端口（默认 `8189`）已被占用，批次会报错并保留正在运行的 LLM。需要停止调度器时，等状态页显示空闲，再在任务计划程序中结束 `ComfyUI-VRAM-Bridge-Desktop`。重新启动时，调度器读取上次交接记录，恢复本地模型。中断时未确认的任务会标记失败，以免重跑已经提交的任务。
 
-若状态显示「待发送」，打开 Hermes Desktop，保持桌面解锁，执行 `python -X utf8 .\bridge.py retry-wake`。若显示「待核实」，先查看 Hermes 是否已收到消息。
+若状态显示「待发送」，打开 Hermes Desktop，保持桌面解锁，执行 `python -X utf8 .\bridge.py retry-wake`。调度器遇到暂时的界面自动化事件错误时，会在调用发送按钮前重试一次。若显示「待核实」，先查看 Hermes 是否已收到消息。
 
 批次、交接记录和日志保存在项目的 `data` 目录，服务输出另见各自的可见控制台。
 

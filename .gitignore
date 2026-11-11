@@ -1,0 +1,11 @@
+/data/
+/hermes-skill/SKILL.md
+/*.json
+!/config.example.json
+__pycache__/
+*.py[cod]
+*.log
+*.db
+*.db-*
+.env
+.venv/

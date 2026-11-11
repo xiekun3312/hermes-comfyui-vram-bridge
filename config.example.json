@@ -1,0 +1,14 @@
+{
+  "control_port": 8781,
+  "llm_port": 8021,
+  "llm_alias": "local-model",
+  "llm_bat": "C:\\local-llm\\serve-model.bat",
+  "comfy_root": "C:\\ComfyUI_windows_portable",
+  "comfy_port": 8188,
+  "gpu_index": 0,
+  "max_idle_vram_mib": 3000,
+  "vram_wait_seconds": 90,
+  "comfy_start_seconds": 360,
+  "llm_start_seconds": 540,
+  "poll_seconds": 2
+}
